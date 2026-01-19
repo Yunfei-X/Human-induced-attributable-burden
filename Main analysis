@@ -1,0 +1,405 @@
+
+cause_index <- c("All")
+
+# SPECIFICATION OF THE EXPOSURE FUNCTION
+varfun <- "ns"
+varper <- c(10,75,90)
+# SPECIFICATION OF THE LAG FUNCTION
+lag <- 21
+lagnk <- 2
+# DEGREE OF FREEDOM FOR SEASONALITY
+dfseas <- 6
+
+
+# MODEL FORMULA
+formula <- y~tmeancb+factor(dow)+factor(holiday)+ns(dot,df=dfseas*length(unique(year)))+ns(RH,df=3)
+
+pop_large <- read.csv(r"(S:\MNHS-SPHPM-EPM\Multi-Country-Study\Data\SES_data_linkage\Population_data\population_LocIDLarge.csv)")
+# LOAD THE FUNCTION FOR COMPUTING THE ATTRIBUTABLE RISK MEASURES
+source("S:/MNHS-SPHPM-CARE/GLOBALENVIRONHealth/01Working folds/Yunfei/Vic_temp_hosp/attrdl.R")
+
+```
+
+
+
+```{r}
+
+
+coef_list<-vcov_list<-list()
+
+issue_log <- data.frame(Disease=character(),i=integer(), region=character(), type=character(), msg=character())
+
+cls <- function(m){
+  m <- tolower(m)
+  if (grepl("step size truncated due to divergence", m, fixed=TRUE)) "divergence_truncated"
+  else if (grepl("glm.fit: algorithm did not converge", m, fixed=TRUE)) "glm_not_converge"
+  else if (grepl("stopped at boundary value", m, fixed=TRUE)) "glm_boundary"
+  else if (grepl("na/nan/inf in 'x'", m, fixed=TRUE)) "nonfinite_in_x"
+  else if (grepl("contrasts can be applied only to factors with 2 or more levels", m, fixed=TRUE)) "contrasts_single_level"
+  else "others"
+}
+
+for(outcome in 1:length(cause_index)){
+  # outcome<-1
+  # OBJECTS TO STORE COEFFICIENTS AND VCOV
+  if (varfun == "bs") {
+    coef <- matrix(NA,length(regions),length(varper)+vardegree,
+                   dimnames=list(regions))
+  } else {
+    coef <- matrix(NA,length(regions),length(varper)+1,
+                   dimnames=list(regions))
+  }
+  
+  vcov <- vector("list",length(regions))
+  names(vcov) <- regions
+  for(i in seq(length(regions))){
+    # PRINT
+    cat(i,"")
+    # EXTRACT THE DATA
+    data <- dlist[[i]]
+    data$y <- unlist(data[,cause_index[outcome]])
+    
+    # DEFINE THE CROSSBASIS
+      if (varfun == "ns") {
+      argvar <- list(fun = varfun, knots = quantile(data$tmean, varper / 100, na.rm = TRUE))
+    } else {
+      argvar <- list(fun = varfun, knots = quantile(data$tmean, varper / 100, na.rm = TRUE), degree = vardegree)
+    }
+    tmeancb <- crossbasis(data$tmean,lag=lag,argvar=argvar,
+                     arglag=list(knots=logknots(lag,lagnk)))
+    
+    # argvar1 <- list(fun = varfun, knots = quantile(data$RH, varper / 100, na.rm = TRUE))
+    # RHcb <- crossbasis(data$RH,lag=lag,argvar=argvar1,
+                     # arglag=list(knots=logknots(lag,lagnk)))
+    
+    # RUN THE MODEL
+    model <- withCallingHandlers(
+    try(glm(formula, data=data, family=quasipoisson, na.action="na.exclude"), silent=TRUE),
+      warning = function(w){
+        issue_log <<- rbind(issue_log, data.frame(
+         Disease=cause_index[outcome], i=i, region=regions[i], type="warning", msg=cls(conditionMessage(w))
+        ))
+        invokeRestart("muffleWarning")
+      }
+    )
+    if (inherits(model, "try-error")){
+      issue_log <- rbind(issue_log, data.frame(
+        Disease=cause_index[outcome],i=i, region=regions[i], type="error", msg=cls(attr(model, "condition")$message)
+      ))
+      next
+    }
+    
+    cen <- mean(data$tmean,na.rm=T)
+    loc <- grepl('tmean',names(coef(model)))
+    
+    pred <- try(crosspred(tmeancb,
+                          coef=coef(model)[loc],
+                          vcov=vcov(model)[loc,loc],
+                          model.link='log',
+                          cen=cen,by=0.1))
+    if("try-error"%in% class(pred)) next
+    cen <- pred$predvar[which.min(pred$allRRfit)]
+    
+    # REDUCTION TO OVERALL CUMULATIVE
+    red <- crossreduce(tmeancb,
+                          coef=coef(model)[loc],
+                          vcov=vcov(model)[loc,loc],
+                          model.link='log',
+                          cen=cen)
+    coef[i,] <- coef(red)
+    vcov[[i]] <- vcov(red)
+  }
+  coef_list[[cause_index[outcome]]]<-coef
+  vcov_list[[cause_index[outcome]]]<-vcov
+}
+# save(coef_list,vcov_list,file=paste0(save_path,"test disease/coef",varfun,dfseas,"lag_",lag,vardegree,"per3.RData"))
+# save(issue_log,file=paste0(save_path,"test disease/issue",varfun,dfseas,"lag_",lag,vardegree,"per3.RData"))
+
+```
+
+
+
+
+```{r}
+########################################################
+################## calculate By country ##################
+country_index <- sort(unique(dataset$ISO))
+text <- "RHcb"
+
+load(paste0(save_path,"test disease/coef",varfun,dfseas,"lag_",lag,vardegree,text,".RData"))
+load(paste0(save_path,"test disease/issue",varfun,dfseas,"lag_",lag,vardegree,text,".RData"))
+antot_results <- aftot_results <- artot_results <- data.frame()
+
+cause_index <- c("All_CVD","All_Cancer","All_Diabetes","All_Infectious", "All_Mental","All_Resp","All_Digestive","All_Nervous","All_Renal")
+
+
+for(outcome in seq(cause_index)){
+
+country_qualify <- ifelse(cause_index[outcome] %in% c("All_CVD","All_Infectious", "All_Resp"),5,4)
+
+
+for (country in seq(country_qualify)) {
+  cat(country,"\n")
+  
+  data <- dataset[dataset$ISO==country_index[country],]
+  regions_cir <- as.character(unique(data$LocIDLarge))
+  dlist_cir <- lapply(regions_cir,function(x) data[data$LocIDLarge==x,])
+  names(dlist_cir) <- regions_cir
+  
+  predper <- c(0:2,2.5,3:97,97.5,98:100)
+  set.seed(13041975)
+  predvar <- rowMeans(sapply(dlist_cir[regions_cir],function(x) quantile(jitter(x$tmean),predper/100,na.rm=T)))
+  
+      if (varfun == "ns") {
+      argvar <- list(x=predvar,
+                     fun=varfun,
+                     knots=predvar[paste(varper,".0%",sep="")])
+    } else {
+      argvar <- list(x=predvar,
+                     fun=varfun,
+                     knots=predvar[paste(varper,".0%",sep="")],
+                     degree=vardegree)
+    }
+  bvar <- do.call(onebasis,argvar)
+  
+  
+  ## LOAD FIRST STAGE DATA
+  coef<-coef_list[[cause_index[outcome]]]
+  vcov<-vcov_list[[cause_index[outcome]]]
+  
+  country_regions <- unique(dataset$LocIDLarge[dataset$ISO == country_index[country]])
+  error_regions <- issue_log$region[issue_log$Disease==cause_index[outcome]]
+  country_regions <- country_regions[!country_regions %in% error_regions]
+
+  coef <- coef[regions%in%country_regions,]
+  vcov <- vcov[regions%in%country_regions]
+  
+  ##
+  include <- (1:nrow(coef))[!is.na(coef[,1])]
+  
+  coef <- coef[include,]
+  vcov <- vcov[include]
+  
+  is_positive_definite <- function(mat) {
+    eigenvalues <- eigen(mat)$values 
+    # max_vcov <- max(as.vector(mat))<500
+    all(eigenvalues > 0)
+    # all(eigenvalues > 0) &(max_vcov)
+  }
+  index<-sapply(vcov,is_positive_definite)
+  
+  coef <- coef[which(index==TRUE),]
+  vcov <- vcov[which(index==TRUE)]
+  regions_new_cir <- names(vcov)
+  
+  ## META
+  mv <- mixmeta(coef~1,vcov)
+  
+  # OBTAIN BLUPS the best linear unbiased predictor
+  blup <- blup.mixmeta(mv,vcov=T)
+  
+  # GENERATE THE MATRIX FOR STORING THE RESULTS
+  minperccity <- mintempcity <- rep(NA,length(regions_new_cir))
+  names(mintempcity) <- names(minperccity) <- regions_new_cir
+    
+  # calculate MMT
+  for(k in seq(length(regions_new_cir))) {
+        data <- dlist[[regions_new_cir[k]]]
+        predvar <- quantile(data$tmean,1:99/100,na.rm=T)
+        # REDEFINE THE FUNCTION USING ALL THE ARGUMENTS (BOUNDARY KNOTS INCLUDED)
+        if (varfun == "ns") {
+        argvar <- list(x=predvar,
+                     fun=varfun,
+                     knots=quantile(data$tmean,varper/100,na.rm=T),
+                     Bound=range(data$tmean,na.rm=T))
+        } else {
+         argvar <- list(x=predvar,
+                     fun=varfun,
+                     knots=quantile(data$tmean,varper/100,na.rm=T),
+                     Bound=range(data$tmean,na.rm=T),
+                     degree=vardegree)
+       }
+        
+        bvar <- do.call(onebasis,argvar)
+        minperccity[k] <- (1:99)[which.min((bvar%*%blup[[k]]$blup))]
+        mintempcity[k] <- quantile(data$tmean,minperccity[k]/100,na.rm=T)
+  }
+    
+    # CREATE THE MATRIX TO STORE THE ATTRIBUTABLE DEATHS
+    matsim <- matrix(NA,length(regions_new_cir),5,dimnames=list(regions_new_cir,c("glob","extreme cold","cold","extreme heat","heat")))
+    # NUMBER OF SIMULATION RUNS FOR COMPUTING EMPIRICAL CI
+    nsim <- 1000
+    tothosp <- totpop <- c()
+    # CREATE THE ARRAY TO STORE THE CI OF ATTRIBUTABLE DEATHS
+    arraysim <- array(NA,dim=c(length(regions_new_cir),5,nsim),
+                      dimnames=list(regions_new_cir,c("glob","extreme cold","cold","extreme heat","heat")))
+    set.seed(1234)
+    for(m in seq(regions_new_cir)){
+        cat(m,"")
+        data <- dlist[[regions_new_cir[m]]]
+        
+        # DERIVE THE CROSS-BASIS
+        if (varfun == "ns") {
+      argvar <- list(x=data$tmean,fun=varfun,knots=quantile(data$tmean,
+                                                          varper/100,na.rm=T))
+    } else {
+      argvar <- list(x=data$tmean,fun=varfun,knots=quantile(data$tmean,
+                                                          varper/100,na.rm=T),degree=vardegree)
+    }
+        
+        cb <- crossbasis(data$tmean,lag=lag,argvar=argvar,
+                     arglag=list(knots=logknots(lag,lagnk)))
+            
+        ## calculate threshold
+        predvar <- quantile(data$tmean,c(2.5,97.5)/100,na.rm=T)
+        thr_ecold <- predvar["2.5%"]
+        thr_ehot <- predvar["97.5%"]
+
+
+        # COMPUTE THE ATTRIBUTABLE Hosp
+        # NB: THE REDUCED COEFFICIENTS ARE USED HERE
+        matsim[m,"glob"] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                   vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m])
+        matsim[m,"extreme cold"] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                   vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                   range=c(-100,thr_ecold))
+        matsim[m,"cold"] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                   vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                   range=c(-100,mintempcity[m]))
+        matsim[m,"extreme heat"] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                   vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                   range=c(thr_ehot,100))
+        matsim[m,"heat"] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                   vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                   range=c(mintempcity[m],100))
+        
+        
+        # COMPUTE EMPIRICAL OCCURRENCES OF THE ATTRIBUTABLE DEATHS
+        # USED TO DERIVE CONFIDENCE INTERVALS
+        arraysim[m,"glob",] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                      vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],sim=T,nsim=nsim)
+        arraysim[m,"extreme cold",] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                      vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                      range=c(-100,thr_ecold),sim=T,nsim=nsim)
+        arraysim[m,"cold",] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                      vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                      range=c(-100,mintempcity[m]),sim=T,nsim=nsim)
+        arraysim[m,"extreme heat",] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                      vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                      range=c(thr_ehot,100),sim=T,nsim=nsim)
+        arraysim[m,"heat",] <- attrdl(data$tmean,cb,data[[cause_index[outcome]]],coef=blup[[m]]$blup,
+                                      vcov=blup[[m]]$vcov,type="an",dir="forw",cen=mintempcity[m],
+                                      range=c(mintempcity[m],100),sim=T,nsim=nsim)
+        
+        tothosp[m] <- sum(data[[cause_index[outcome]]],na.rm=T)
+        
+        # y0 <- year(min(data$date, na.rm = TRUE))
+        # y1 <- year(max(data$date, na.rm = TRUE))
+        # yr_cols <- intersect(paste0("population_", y0:y1), names(pop_large))
+        # totpop[m] <- pop_large %>%
+        #   filter(LocIDLarge == regions_new_cir[m]) %>%
+        #   summarise(totpop = sum(dplyr::c_across(all_of(yr_cols)), na.rm = TRUE)) %>%
+        #   dplyr::pull(totpop)
+        
+        sd <- min(data$date, na.rm = TRUE)
+        ed <- max(data$date, na.rm = TRUE)
+        cols <- intersect(paste0("population_", year(sd):year(ed)), names(pop_large))
+        yrs  <- as.integer(sub("population_", "", cols))
+        
+        days <- pmax(0L, as.integer(pmin(as.Date(sprintf("%d-12-31", yrs)), ed) -
+                                    pmax(as.Date(sprintf("%d-01-01", yrs)), sd) + 1L))
+        row  <- pop_large[pop_large$LocIDLarge == regions_new_cir[m], cols, drop = FALSE]
+        py <- days / ifelse(leap_year(yrs), 366, 365)
+        totpop[m] <- if (nrow(row)) sum(as.numeric(row[1, ]) * py, na.rm = TRUE) else NA
+    }
+    
+    #ATTRIBUTABLE NUMBERS-----
+    # CITY-SPECIFIC
+    ancity <- matsim
+    ancitylow <- apply(arraysim,c(1,2),quantile,0.025, na.rm = TRUE)
+    ancityhigh <- apply(arraysim,c(1,2),quantile,0.975, na.rm = TRUE)
+    rownames(ancity) <- rownames(ancitylow) <- rownames(ancityhigh) <- regions_new_cir
+    
+    # TOTAL
+    # NB: FIRST SUM THROUGH CITIES
+    antot <- colSums(matsim)
+    antotlow <- apply(apply(arraysim,c(2,3),sum),1,quantile,0.025)
+    antothigh <- apply(apply(arraysim,c(2,3),sum),1,quantile,0.975)
+
+    antot_values <- sprintf("%d (%d, %d)", round(antot), round(antotlow), round(antothigh))
+    categories<-names(antot)
+    antot_matrix <- matrix(antot_values, nrow = 1)
+    colnames(antot_matrix) <- categories
+    antot_matrix <- data.frame(antot_matrix)
+    antot_matrix$country <- country_index[country]
+    antot_matrix$Disease <- cause_index[outcome]
+    
+    antot_results<-rbind(antot_results,antot_matrix)
+    
+    # ATTRIBUTABLE FRACTION-------
+    # all COUNTRY
+    tothosptot <- sum(tothosp)
+    # ATTRIBUTABLE FRACTIONS
+    # CITY-SPECIFIC
+    afcity <- ancity/tothosp*100
+    afcitylow <- ancitylow/tothosp*100
+    afcityhigh <- ancityhigh/tothosp*100
+    
+    
+    # TOTAL
+    aftot <- antot/tothosptot*100
+    aftotlow <- antotlow/tothosptot*100
+    aftothigh <- antothigh/tothosptot*100
+    
+    aftot_values <- sprintf("%.2f (%.2f, %.2f)", aftot, aftotlow, aftothigh)
+    categories_af<-names(aftot)
+
+    aftot_matrix <- matrix(aftot_values, nrow = 1)
+    colnames(aftot_matrix) <- categories_af
+    
+    aftot_matrix <- data.frame(aftot_matrix)
+    aftot_matrix$country <- country_index[country]
+    aftot_matrix$Disease <- cause_index[outcome]
+
+    aftot_results<-rbind(aftot_results,aftot_matrix)
+    
+    # ATTRIBUTABLE rate-------
+    # all COUNTRY
+    mask <- is.finite(totpop) & totpop > 0
+    totpoptot <- sum(totpop[mask], na.rm = TRUE)
+    # ATTRIBUTABLE FRACTIONS
+    # CITY-SPECIFIC
+    arcity <- ancity[mask,]/totpop[mask]*100000
+    arcitylow <- ancitylow[mask,]/totpop[mask]*100000
+    arcityhigh <- ancityhigh[mask,]/totpop[mask]*100000
+    
+    
+    # TOTAL
+    antot_missing <- colSums(matsim[mask,,drop = FALSE],na.rm = TRUE)
+    antotlow_missing <- apply(apply(arraysim[mask,,,drop = FALSE],c(2,3),sum),1,quantile,0.025)
+    antothigh_missing <- apply(apply(arraysim[mask,,,drop = FALSE],c(2,3),sum),1,quantile,0.975)
+    
+    artot <- antot_missing/totpoptot*100000
+    artotlow <- antotlow_missing/totpoptot*100000
+    artothigh <- antothigh_missing/totpoptot*100000
+    
+    artot_values <- sprintf("%.0f (%.0f, %.0f)", artot, artotlow, artothigh)
+    categories_ar<-names(artot)
+
+    artot_matrix <- matrix(artot_values, nrow = 1)
+    colnames(artot_matrix) <- categories_ar
+    
+    artot_matrix <- data.frame(artot_matrix)
+    artot_matrix$country <- country_index[country]
+    artot_matrix$Disease <- cause_index[outcome]
+
+    artot_results<-rbind(artot_results,artot_matrix)
+
+    
+}
+
+write.csv(aftot_results,file=paste0(save_path,"result/af_country",varfun,dfseas,lag,vardegree,text,".csv"))
+write.csv(antot_results,file=paste0(save_path,"result/an_country",varfun,dfseas,lag,vardegree,text,".csv"))
+write.csv(artot_results,file=paste0(save_path,"result/ar_country",varfun,dfseas,lag,vardegree,text,".csv"))
+
+}
