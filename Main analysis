@@ -12,7 +12,7 @@ dfseas <- 5
 
 
 # MODEL FORMULA
-formula <- y~tmeancb+factor(dow)+factor(holiday)+ns(dot,df=dfseas*length(unique(year)))+ns(RH,df=3)
+formula <- y~tmeancb+factor(dow)+factor(holiday)+ns(dot,df=dfseas*length(unique(year)))
 
 # LOAD THE FUNCTION FOR COMPUTING THE ATTRIBUTABLE RISK MEASURES
 source("attrdl.R")
